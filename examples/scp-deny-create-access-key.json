@@ -1,0 +1,9 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenyCreateAccessKey",
+    "Effect": "Deny",
+    "Action": "iam:CreateAccessKey",
+    "Resource": "*"
+  }]
+}

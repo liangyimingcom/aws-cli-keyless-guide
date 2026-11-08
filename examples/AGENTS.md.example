@@ -1,0 +1,6 @@
+## AWS 访问约定
+- 只能通过 `--profile prod-readonly` 访问 AWS；SDK 使用 `AWS_PROFILE=prod-readonly`。
+- 开始工作前先执行 `aws sts get-caller-identity --profile prod-readonly` 确认身份。
+- 遇到 "Token has expired" 时停止，请工程师执行 `aws sso login --sso-session main-sso`。
+- 不得索要访问密钥，不得修改 ~/.aws 下的任何文件。
+- 任何写操作（创建、修改、删除资源）必须先经工程师确认。

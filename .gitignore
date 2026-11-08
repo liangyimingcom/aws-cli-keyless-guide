@@ -1,0 +1,6 @@
+sso.fragment
+*.zip
+credentials
+.env
+.DS_Store
+__pycache__/
