@@ -11,7 +11,8 @@ def parse(text):
     for line in text.splitlines(keepends=True):
         m = SEC.match(line)
         if m:
-            secs.append((re.sub(r"\s+", " ", m.group(1).strip()), [line]))
+            name = re.sub(r"\s+", " ", m.group(1).strip())
+            secs.append(("default" if name == "profile default" else name, [line]))   # 两种写法等价
         elif secs:
             secs[-1][1].append(line)
         else:
@@ -19,7 +20,7 @@ def parse(text):
     return head, secs
 
 frag_path, dry = sys.argv[1], "--dry-run" in sys.argv
-cfg = os.path.expanduser("~/.aws/config")
+cfg = os.path.realpath(os.path.expanduser("~/.aws/config"))   # 若是指向 dotfiles 的符号链接，写回真实文件
 os.makedirs(os.path.dirname(cfg), mode=0o700, exist_ok=True)
 old = open(cfg, encoding="utf-8").read() if os.path.exists(cfg) else ""
 frag = open(frag_path, encoding="utf-8").read()

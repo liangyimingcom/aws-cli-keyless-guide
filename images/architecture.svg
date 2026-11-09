@@ -1,58 +1,74 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="470" viewBox="0 0 1000 470" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="625" viewBox="0 0 1200 625" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif">
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#232F3E"/></marker>
     <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#E7157B"/></marker>
   </defs>
-  <rect width="1000" height="470" fill="#ffffff"/>
-  <text x="500" y="32" text-anchor="middle" font-size="20" font-weight="bold" fill="#232F3E">运维工作站：从长期访问密钥到 IAM Identity Center 临时凭证</text>
+  <rect width="1200" height="625" fill="#ffffff"/>
+  <text x="600" y="38" text-anchor="middle" font-size="22" font-weight="bold" fill="#232F3E">运维工作站：从长期访问密钥到 IAM Identity Center 临时凭证</text>
+  <text x="600" y="62" text-anchor="middle" font-size="12" fill="#545B64">本图以 IAM Identity Center 为例；选用 aws login 时，本机缓存位于 ~/.aws/login/cache，其余思路相同</text>
 
   <!-- workstation -->
-  <rect x="30" y="70" width="290" height="330" rx="10" fill="#F2F3F3" stroke="#545B64" stroke-width="1.5"/>
-  <text x="175" y="98" text-anchor="middle" font-size="16" font-weight="bold" fill="#232F3E">运维工作站（macOS / Linux）</text>
-  <rect x="50" y="115" width="250" height="70" rx="6" fill="#ffffff" stroke="#879196"/>
-  <text x="175" y="140" text-anchor="middle" font-size="14" fill="#232F3E">AWS CLI v2 / SDK / Terraform / CDK</text>
-  <text x="175" y="163" text-anchor="middle" font-size="13" fill="#545B64">AI 编码助手（只读 profile）</text>
-  <rect x="50" y="200" width="250" height="78" rx="6" fill="#ffffff" stroke="#1D8102" stroke-width="1.5"/>
-  <text x="175" y="224" text-anchor="middle" font-size="14" fill="#1D8102" font-weight="bold">~/.aws/config</text>
-  <text x="175" y="246" text-anchor="middle" font-size="12" fill="#232F3E">[sso-session] + [profile prod] …</text>
-  <text x="175" y="266" text-anchor="middle" font-size="12" fill="#232F3E">保留原有 profile 名称，脚本无需修改</text>
-  <rect x="50" y="292" width="250" height="90" rx="6" fill="#ffffff" stroke="#D13212" stroke-width="1.5" stroke-dasharray="6,4"/>
-  <text x="175" y="316" text-anchor="middle" font-size="14" fill="#D13212" font-weight="bold">~/.aws/credentials</text>
-  <text x="175" y="338" text-anchor="middle" font-size="12" fill="#D13212">迁移前：长期密钥 AKIA…（不过期）</text>
-  <text x="175" y="360" text-anchor="middle" font-size="12" fill="#1D8102">迁移后：不再保存长期密钥</text>
+  <rect x="20" y="80" width="360" height="465" rx="10" fill="#F2F3F3" stroke="#545B64" stroke-width="1.5"/>
+  <text x="200" y="108" text-anchor="middle" font-size="16" font-weight="bold" fill="#232F3E">运维工作站（macOS / Linux）</text>
+
+  <rect x="40" y="125" width="320" height="72" rx="6" fill="#ffffff" stroke="#879196"/>
+  <text x="200" y="153" text-anchor="middle" font-size="13" fill="#232F3E">AWS CLI v2 / SDK / Terraform / CDK</text>
+  <text x="200" y="178" text-anchor="middle" font-size="12" fill="#545B64">IDE 插件、AI 编码助手等本机工具</text>
+
+  <rect x="40" y="210" width="320" height="78" rx="6" fill="#ffffff" stroke="#1D8102" stroke-width="1.5"/>
+  <text x="200" y="235" text-anchor="middle" font-size="14" fill="#1D8102" font-weight="bold">~/.aws/config</text>
+  <text x="200" y="257" text-anchor="middle" font-size="12" fill="#232F3E">[sso-session] + [profile prod] …</text>
+  <text x="200" y="277" text-anchor="middle" font-size="12" fill="#232F3E">保留原有 profile 名称，脚本无需修改</text>
+
+  <rect x="40" y="301" width="320" height="100" rx="6" fill="#FFF8EC" stroke="#FF9900" stroke-width="1.5"/>
+  <text x="200" y="325" text-anchor="middle" font-size="14" fill="#B35C00" font-weight="bold">本机会话缓存（有时效）</text>
+  <text x="200" y="347" text-anchor="middle" font-size="12" fill="#232F3E">~/.aws/sso/cache · ~/.aws/cli/cache</text>
+  <text x="200" y="368" text-anchor="middle" font-size="12" fill="#232F3E">访问令牌、刷新令牌与临时凭证（明文）</text>
+  <text x="200" y="389" text-anchor="middle" font-size="12" fill="#545B64">建议：保守的会话时长 + 磁盘加密</text>
+
+  <rect x="40" y="414" width="320" height="110" rx="6" fill="#ffffff" stroke="#D13212" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="200" y="440" text-anchor="middle" font-size="14" fill="#D13212" font-weight="bold">~/.aws/credentials</text>
+  <text x="200" y="463" text-anchor="middle" font-size="12" fill="#D13212">迁移前：长期密钥 AKIA…（不过期）</text>
+  <text x="200" y="485" text-anchor="middle" font-size="12" fill="#1D8102">迁移后：同名静态段已清除</text>
+  <text x="200" y="507" text-anchor="middle" font-size="12" fill="#1D8102">不再保存长期密钥</text>
 
   <!-- identity center -->
-  <rect x="385" y="110" width="250" height="210" rx="10" fill="#FFF4E5" stroke="#FF9900" stroke-width="2"/>
-  <text x="510" y="140" text-anchor="middle" font-size="16" font-weight="bold" fill="#232F3E">AWS IAM Identity Center</text>
-  <text x="510" y="172" text-anchor="middle" font-size="13" fill="#232F3E">• 统一的工作人员身份</text>
-  <text x="510" y="197" text-anchor="middle" font-size="13" fill="#232F3E">• 多重身份验证（MFA）</text>
-  <text x="510" y="222" text-anchor="middle" font-size="13" fill="#232F3E">• 权限集（最小权限）</text>
-  <text x="510" y="247" text-anchor="middle" font-size="13" fill="#232F3E">• 会话时长 1–12 小时</text>
-  <text x="510" y="272" text-anchor="middle" font-size="13" fill="#232F3E">• 一处停用，所有账号收回</text>
-  <text x="510" y="300" text-anchor="middle" font-size="12" fill="#545B64">全球区域与中国区域各自独立部署</text>
+  <rect x="480" y="130" width="290" height="300" rx="10" fill="#FFF4E5" stroke="#FF9900" stroke-width="2"/>
+  <text x="625" y="162" text-anchor="middle" font-size="17" font-weight="bold" fill="#232F3E">AWS IAM Identity Center</text>
+  <g font-size="13" fill="#232F3E">
+    <text x="502" y="196">• 统一的工作人员身份</text>
+    <text x="502" y="223">• 多重身份验证（MFA）</text>
+    <text x="502" y="250">• 权限集（最小权限）</text>
+    <text x="502" y="277">• 权限集会话：每份凭证 1–12 小时</text>
+    <text x="502" y="304">• 用户会话：决定多久重新登录</text>
+    <text x="502" y="331">• 一处停用，所有账号收回</text>
+    <text x="502" y="358">• 设备丢失：可立即结束活动会话</text>
+  </g>
+  <text x="625" y="400" text-anchor="middle" font-size="12" fill="#545B64">全球区域与中国区域各自独立部署</text>
 
   <!-- accounts -->
-  <rect x="700" y="80" width="270" height="300" rx="10" fill="#F2F8FD" stroke="#147EBA" stroke-width="1.5"/>
-  <text x="835" y="108" text-anchor="middle" font-size="16" font-weight="bold" fill="#232F3E">AWS 账号</text>
-  <rect x="720" y="125" width="230" height="58" rx="6" fill="#ffffff" stroke="#147EBA"/>
-  <text x="835" y="150" text-anchor="middle" font-size="13" fill="#232F3E">生产账号</text>
-  <text x="835" y="170" text-anchor="middle" font-size="11" fill="#545B64">AWSReservedSSO_&lt;权限集&gt;_* 角色</text>
-  <rect x="720" y="198" width="230" height="58" rx="6" fill="#ffffff" stroke="#147EBA"/>
-  <text x="835" y="223" text-anchor="middle" font-size="13" fill="#232F3E">测试 / 开发账号</text>
-  <text x="835" y="243" text-anchor="middle" font-size="11" fill="#545B64">同一组织，共享一次登录</text>
-  <rect x="720" y="271" width="230" height="58" rx="6" fill="#ffffff" stroke="#147EBA"/>
-  <text x="835" y="296" text-anchor="middle" font-size="13" fill="#232F3E">中国区域账号</text>
-  <text x="835" y="316" text-anchor="middle" font-size="11" fill="#545B64">独立的 Identity Center（awsapps.cn）</text>
+  <rect x="870" y="90" width="310" height="310" rx="10" fill="#F2F8FD" stroke="#147EBA" stroke-width="1.5"/>
+  <text x="1025" y="120" text-anchor="middle" font-size="16" font-weight="bold" fill="#232F3E">AWS 账号</text>
+  <rect x="890" y="138" width="270" height="66" rx="6" fill="#ffffff" stroke="#147EBA"/>
+  <text x="1025" y="164" text-anchor="middle" font-size="13" fill="#232F3E">生产账号</text>
+  <text x="1025" y="186" text-anchor="middle" font-size="11" fill="#545B64">AWSReservedSSO_&lt;权限集&gt;_* 角色</text>
+  <rect x="890" y="220" width="270" height="66" rx="6" fill="#ffffff" stroke="#147EBA"/>
+  <text x="1025" y="246" text-anchor="middle" font-size="13" fill="#232F3E">测试 / 开发账号</text>
+  <text x="1025" y="268" text-anchor="middle" font-size="11" fill="#545B64">同一组织，共享一次登录</text>
+  <rect x="890" y="302" width="270" height="66" rx="6" fill="#ffffff" stroke="#147EBA"/>
+  <text x="1025" y="328" text-anchor="middle" font-size="13" fill="#232F3E">中国区域账号</text>
+  <text x="1025" y="350" text-anchor="middle" font-size="11" fill="#545B64">独立的 Identity Center（awsapps.cn）</text>
 
   <!-- arrows -->
-  <line x1="300" y1="140" x2="383" y2="160" stroke="#232F3E" stroke-width="2" marker-end="url(#a)"/>
-  <text x="300" y="128" font-size="12" fill="#232F3E">① aws sso login（浏览器 + MFA）</text>
-  <line x1="383" y1="215" x2="302" y2="232" stroke="#232F3E" stroke-width="2" marker-end="url(#a)"/>
-  <text x="326" y="200" font-size="12" fill="#232F3E">② 访问令牌</text>
-  <line x1="635" y1="180" x2="698" y2="160" stroke="#232F3E" stroke-width="2" marker-end="url(#a)"/>
-  <text x="626" y="158" font-size="12" fill="#232F3E">③ 签发角色</text>
-  <path d="M300,262 C470,370 600,370 718,300" fill="none" stroke="#E7157B" stroke-width="2.2" marker-end="url(#o)"/>
-  <text x="420" y="378" font-size="13" fill="#E7157B" font-weight="bold">④ 使用临时凭证（ASIA…，到期自动失效）调用 AWS API</text>
+  <line x1="362" y1="160" x2="477" y2="196" stroke="#232F3E" stroke-width="2" marker-end="url(#a)"/>
+  <text x="388" y="128" font-size="11.5" fill="#232F3E">① aws sso login</text>
+  <text x="388" y="145" font-size="11.5" fill="#545B64">（浏览器+MFA）</text>
+  <line x1="477" y1="312" x2="363" y2="345" stroke="#232F3E" stroke-width="2" marker-end="url(#a)"/>
+  <text x="392" y="300" font-size="12" fill="#232F3E">② 访问令牌</text>
+  <line x1="772" y1="232" x2="886" y2="196" stroke="#232F3E" stroke-width="2" marker-end="url(#a)"/>
+  <text x="776" y="200" font-size="12" fill="#232F3E">③ 签发角色凭证</text>
+  <path d="M362,378 C470,570 760,570 887,345" fill="none" stroke="#E7157B" stroke-width="2.2" marker-end="url(#o)"/>
+  <text x="625" y="552" text-anchor="middle" font-size="13" fill="#E7157B" font-weight="bold">④ 使用临时凭证（ASIA…，到期自动失效）调用 AWS API</text>
 
-  <text x="500" y="440" text-anchor="middle" font-size="13" fill="#545B64">长期密钥在 IAM 中停用并删除；本机仅保留可自动过期的会话缓存</text>
+  <text x="600" y="600" text-anchor="middle" font-size="13" fill="#545B64">旧长期密钥在 IAM 中先停用、确认无影响后再删除；本机只保留有时效的会话缓存，不再有永不过期的密钥</text>
 </svg>

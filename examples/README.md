@@ -8,9 +8,8 @@
 | `merge_config.py` | 步骤 3 | 把配置片段按段合并进 `~/.aws/config`，支持 `--dry-run` |
 | `neutralize_credentials.py` | 步骤 4 | 删除 `~/.aws/credentials` 中与 SSO profile 同名的静态段，支持 `--dry-run` |
 | `verify.sh` | 步骤 5 | 逐个 profile 核对账号 ID、SSO 角色和临时凭证（只读）。先修改脚本中的 `CHECKS` |
-| `logout-one.sh` | 步骤 7 | 只退出一个 sso-session |
-| `scp-deny-create-access-key.json` | 进阶建议 | 禁止成员账号新建访问密钥的 SCP 示例 |
-| `AGENTS.md.example` | 步骤 8 | 给 AI 编码助手的 AWS 访问约定 |
+| `logout-one.sh` | 步骤 7 | 只清除一个 sso-session 的本地令牌缓存（依赖 AWS CLI 缓存实现，升级 CLI 后请复测） |
+| `scp-deny-create-access-key.json` | 进阶建议 | 禁止成员账号新建访问密钥的 SCP 示例（含例外角色条件，请先在测试 OU 验证） |
 | `kiro-prompt.txt` | 让 Kiro 替你完成迁移 | 粘贴给 Kiro 的提示词，换掉尖括号里的内容即可 |
 
 ```bash
