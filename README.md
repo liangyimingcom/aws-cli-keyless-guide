@@ -1,205 +1,82 @@
-# 让电脑里"无钥可偷"：30 分钟把 AWS CLI 从长期访问密钥迁移到 AWS IAM Identity Center
+# 让电脑里"无钥可偷"：用 aws login 或 IAM Identity Center 告别 AWS CLI 长期访问密钥
 
 先做个小实验。打开终端，执行：
 
 ```bash
-grep -c 'AKIA' ~/.aws/credentials
+$ grep -o 'AKIA' ~/.aws/credentials ~/.aws/config 2>/dev/null | wc -l
 ```
 
-如果结果大于 0，你的电脑里就存着**永不过期的 AWS 钥匙**。它们可能已经跟着你换过两台电脑，被同步过一次网盘，还被好几个 IDE 插件和 AI 编码助手读取过。只要没人到 IAM 里把它们停用，它们就一直有效。
+结果大于 0，说明你的电脑里存着**永不过期的亚马逊云科技访问密钥**。只要没人到 IAM 里停用它们，它们就一直有效，而本机的 IDE 插件、AI 编码助手、依赖包安装脚本都能读到这个文件。
 
-本文分享一次真实的迁移实践：在**不改动任何现有脚本**的前提下，用约 30 分钟把运维工作站上的长期访问密钥全部换成 AWS IAM Identity Center 签发的**临时凭证**，再在 AWS 侧把旧密钥彻底停用并删除。迁移完成后，上面那条命令的结果会变成 0。电脑上即使有程序把凭证文件翻一遍，也找不到一把能长期使用的访问密钥。
+本文按你**现在的情况**给出两条官方路径，目标相同：**不改动现有脚本**（profile 名称不变），把本机的长期访问密钥换成自动过期的临时凭证，再在 IAM 中停用并删除旧密钥。
 
-> **适合读者**：使用 AWS CLI 管理多个账号的运维和平台工程师，需要了解 IAM 和 AWS CLI profile 的基本概念（Level 200–300）。
-> **你将获得**：7 个可直接照做的步骤、每一步的检查点，以及备份、合并配置、清理凭证、验证、单会话退出等关键示例代码。
->
-> 🤖 **不想自己敲命令？** 把一段提示词粘贴给 AI 编码助手 **Kiro**，它会读完本文并替你执行迁移，你只需确认和登录。见下文「[让 Kiro 替你完成迁移](#让-kiro-替你完成迁移)」。
-
-> 📁 文中的示例脚本也单独放在 [`examples/`](examples/) 目录里，可以直接下载使用。
+> **适合读者**：使用 AWS CLI 的运维、平台工程师和开发者（Level 200–300）。本文不涉及如何开通 IAM Identity Center。不想自己敲命令的，可以跳到「[让 Kiro 替你完成迁移](#让-kiro-替你完成迁移)」。
 
 ---
 
-## 背景：为什么现在是时候了
-
-### 官方建议早已明确
-
-亚马逊云科技在 [IAM 安全最佳实践](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html) 中建议：**人类用户应通过身份提供商联合访问 AWS，并使用临时凭证**；需要集中管理多账号访问时，推荐使用 AWS IAM Identity Center。[AWS Well-Architected 框架安全支柱 SEC02-BP02](https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/sec_identities_unique.html) 也把"开发者使用 IAM 用户的长期访问密钥，而不是通过联合身份从 CLI 获取临时凭证"列为常见反模式，并把未遵循该最佳实践的风险等级定为**高**。
-
-### 现实中的三个顾虑
-
-不少团队仍然沿用"创建 IAM 用户 → 生成访问密钥 → 写入 `~/.aws/credentials`"的做法，常见的顾虑有三个：
-
-- **担心改造成本高**：脚本、Terraform、CDK、IDE 插件都按 profile 读取凭证，改动范围看起来很大。
-- **账号多，关系复杂**：生产、测试、开发账号分布在一个或多个组织里，有的团队还同时运维全球区域和中国区域的账号。
-- **不敢动**：不清楚哪把密钥还在用，担心一删就影响生产。
-
-### 工作站环境正在变化
-
-如今，AI 编码助手、各类 CLI 工具和依赖包的安装脚本，都以当前用户身份运行在工程师的电脑上，能读取用户目录下的文件。按照 [IAM 用户指南](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html) 的说明，共享凭证文件中的访问密钥是**明文存储**的。也就是说，本机能读到 `~/.aws/credentials` 的程序越多，长期密钥被意外读取、复制、外传的可能性就越大。
-
-治本的办法不是把密钥藏得更好，而是让工作站上**根本没有长期密钥**。
-
-### 迁移前后对比
-
-| 维度 | 迁移前 | 迁移后 |
-|---|---|---|
-| 本机保存的凭证 | 长期访问密钥（`AKIA` 开头），不会过期 | 只有登录会话缓存；调用 API 时使用临时凭证（`ASIA` 开头） |
-| 有效期 | 直到被手动停用或删除 | 每份临时凭证的有效期由权限集会话时长决定（1–12 小时）；多久需要重新登录，由 Identity Center 的用户会话时长决定 |
-| 如何获取 | 复制、粘贴密钥 | 在浏览器登录 IAM Identity Center，可强制 MFA |
-| 人员变动时 | 逐个账号查找、删除密钥 | 在 Identity Center 停用该用户，所有账号的访问一并收回 |
-| 现有脚本 | — | profile 名称不变，`--profile`、`AWS_PROFILE` 的写法无需修改 |
-
----
-
-## 选择适合你的方式
-
-要让工作站上不再保存长期密钥，AWS CLI 目前有两种官方方式。两者都是在浏览器中登录，由 CLI 自动获取和刷新临时凭证，区别在于身份由谁管理、管理多少账号：
-
-- **[`aws login`](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html)**（AWS CLI 2.32.0 及以上）：直接使用登录控制台的身份，即 root 用户、IAM 用户，或通过 IAM 联合的角色。CLI 每 15 分钟自动刷新临时凭证，会话最长 12 小时。
-- **IAM Identity Center**（`sso-session` 需要 AWS CLI 2.9.0 及以上）：使用在 Identity Center 中统一管理的工作人员身份，一次登录即可访问所有已分配的账号。
-
-| 维度 | `aws login` | IAM Identity Center |
-|---|---|---|
-| 登录身份 | 各账号自己的 root 用户、IAM 用户，或通过 IAM 联合（企业 IdP）登录的角色 | 在 Identity Center 中统一管理的工作人员身份 |
-| 多账号 | 每个账号（或角色）各配一个 profile，分别登录 | 一个 `sso-session` 登录一次，覆盖所有已分配的账号 |
-| MFA | 沿用控制台登录的 MFA 设置（IAM 用户的 MFA，或企业 IdP 的 MFA） | 在 Identity Center 中统一配置，可强制所有用户启用 |
-| 人员变动 | IAM 用户：需要到每个账号里分别停用；IAM 联合：在企业 IdP 中停用即可 | 在 Identity Center（或其对接的 IdP）停用一次，所有账号的访问一并收回 |
-| 权限管理 | 沿用各账号中 IAM 用户或角色的策略；非 root 身份另需 `SignInLocalDevelopmentAccess` 托管策略 | 权限集集中定义，按账号分配 |
-| 前期准备 | 几乎不需要，升级 CLI 即可使用 | 需要管理员先启用 Identity Center，并配置用户和权限集 |
-| SDK 与工具兼容 | 需要较新版本的 SDK；不支持的旧工具可通过 `credential_process` 由 CLI 代为提供凭证 | 主流 SDK 和工具（如 Terraform、AWS CDK）普遍支持 SSO profile |
-| 本机缓存 | `~/.aws/login/cache/` | `~/.aws/sso/cache/` |
-
-可以根据自己的情况选择：
-
-- **个人账号或账号很少时，用 `aws login` 最快。** 不需要启用新服务，升级 CLI 后执行 `aws login --profile <名称>`，在浏览器中确认即可。适合个人开发者、实验账号，或者团队还没有启用 Identity Center 的过渡阶段。
-- **需要集中管理多个账号、多名工程师时，用 IAM Identity Center。** 多账号一次登录，人员变动一处收回，权限集统一管理，MFA 可统一强制。官方文档也说明，已经使用 IAM Identity Center 的，应按 Identity Center 的方式配置 CLI。
-
-> **中国区域**：中国区域的账号无论选用哪一种，都请以 [docs.amazonaws.cn](https://docs.amazonaws.cn/en_us/cli/latest/userguide/cli-chap-authentication.html) 中国区文档为准，并先在自己的账号中实际验证。
-
-本文后续步骤以 IAM Identity Center 为例，演示一台管理多个账号的运维工作站的完整迁移过程。选择 `aws login` 的读者，步骤 2 的备份、步骤 4 的清理和步骤 6 的"在 IAM 中停用并删除旧密钥"同样适用，**尤其是步骤 6，无论选哪一种都不能省**。
-
----
-
-## 方案概述
-
-![方案架构](images/architecture.svg)
-
-*图 1：迁移后的凭证获取流程*
-
-1. 工程师执行 `aws sso login`，在浏览器中完成 IAM Identity Center 登录（含 MFA）。
-2. AWS CLI 获得访问令牌，缓存在 `~/.aws/sso/cache/`，并通过刷新令牌自动续期。
-3. 调用 AWS API 时，CLI 和 SDK 按 profile 中配置的账号和权限集，换取该账号中 `AWSReservedSSO_<权限集>_*` 角色的临时凭证。
-4. 临时凭证到期后自动失效。访问令牌失效后，重新执行一次 `aws sso login` 即可。
-
-三个关键设计点：
-
-- **一个 Identity Center 实例对应一个 `sso-session`**。同一组织下的生产、测试、开发等多个账号，可以配置成多个 profile，共享这一次登录。
-- **保留原有 profile 名称**。原来叫 `prod` 的 profile，迁移后仍然叫 `prod`，变的只是凭证来源：从静态密钥换成了 SSO。
-- **全球区域与中国区域各配一个 `sso-session`**。亚马逊云科技中国区域与全球区域属于不同的分区，IAM Identity Center 是相互独立的实例。同时运维两边账号的工程师，在本机配置两个 `sso-session` 即可，两者分别登录、分别过期，互不影响。
-
-> ⚠️ **需要清楚的残余风险**：迁移后，本机不再有永不过期的密钥，但 `~/.aws/sso/cache/`（访问令牌和刷新令牌）和 `~/.aws/cli/cache/`（临时凭证）里仍有明文缓存。这些缓存一旦被复制，在会话有效期内仍可使用。因此迁移之后还要做三件事：把权限集和 Identity Center 用户会话时长设得保守一些；开启磁盘加密（如 macOS FileVault）；设备丢失时，由管理员立即结束该用户的活动会话（见步骤 7）。
-
----
-
-## 前提条件
-
-- macOS 或 Linux 工作站，已安装 [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)。`sso-session` 配置需要 2.9.0 及以上版本，建议使用最新版本。
-- 目标账号已启用 AWS IAM Identity Center，并且你有权限创建用户、权限集和账号分配。
-- Python 3，用于运行文中的示例脚本。macOS 上第一次运行 `python3` 时，如果提示安装 Xcode Command Line Tools，按提示安装即可；也可以用 Homebrew 安装。
-
-```bash
-aws --version          # 确认输出为 aws-cli/2.x
-which -a aws           # 确认 PATH 中排在第一位的是新版本
-```
-
----
-
-## 让 Kiro 替你完成迁移
-
-本文的命令都可以手动执行。如果不想自己敲，最省事的办法是：**打开 [Kiro](https://kiro.dev/docs/cli/)（IDE 的对话面板或终端里的 `kiro-cli` 都可以），粘贴下面这段提示词。** Kiro 会自己读完这篇文章，按步骤替你执行，你只负责确认和登录。
-
-交给 Kiro 之前，请注意两点：
-
-- **先自己通读一遍本文**。提示词里的链接固定在 `v1.1` 版本，不会随仓库后续改动而变化；不要把 AI 助手指向未经审阅、随时可能变化的远程内容。
-- **AI 助手与你是同一个系统用户**。迁移过程中它在技术上能读到 `~/.aws/credentials`。提示词要求它只运行文中的脚本（这些脚本不会输出密钥），但这只是约定，不是隔离。在步骤 6 删除旧密钥之前，不要在这台电脑上安装新的第三方插件。
-
-把尖括号里的内容换成你在步骤 1 中拿到的信息，然后整段粘贴给 Kiro：
+## 选择你的路径
 
 ```text
-请阅读这篇文章：https://raw.githubusercontent.com/liangyimingcom/aws-cli-keyless-guide/v1.1/README.md
-按文中步骤 2 到步骤 7，帮我把这台电脑上的 AWS CLI 从长期访问密钥迁移到 IAM Identity Center。
-
-我的信息（profile 名称 = 账号 ID / 权限集）：
-- SSO Start URL：<https://d-xxxxxxxxxx.awsapps.com/start>，SSO Region：<us-east-1>
-- default = <111111111111> / <AdministratorAccess>
-- prod    = <111111111111> / <AdministratorAccess>
-- prod-readonly = <111111111111> / ReadOnlyAccess
-- （如有中国区域）Start URL：<...>，Region：cn-northwest-1，china = <333333333333> / <AdministratorAccess>
-
-请遵守：
-1. 每一步先说明要执行的命令，等我回复"继续"再执行；每步做完按文中检查点汇报结果。
-2. 修改 ~/.aws 下的任何文件之前，先完成步骤 2 的备份（放在家目录，不要放进云盘同步目录）；
-   改写 config 和 credentials 时，先用文中脚本的 --dry-run 给我看差异。
-3. 只运行文中给出的命令和脚本；不要用 cat、less 等命令查看 ~/.aws/credentials 或 ~/.aws/sso/cache，
-   不在输出中显示任何密钥或令牌的值，访问密钥 ID 一律打码显示（例如 AKIA****ABCD）。
-4. aws sso login 由我在浏览器里完成，你给出命令后等我回复"已登录"。
-5. IAM 中的停用、删除命令必须逐条列出、逐条经我确认，不得批量执行。
-6. 不要执行 aws sso logout，不要删除 ~/.aws/sso/cache 下的文件。
+你能打开 AWS access portal（形如 https://d-xxxxxxxxxx.awsapps.com/start），并看到要用的账号吗？
+├── 能   → 路径 B：IAM Identity Center（sso-session，AWS CLI 2.9.0+）
+└── 不能 → 你能用 IAM 用户或企业 IdP 联合身份登录控制台吗？
+          ├── 能       → 路径 A：aws login（AWS CLI 2.32.0+）
+          └── 只有 root → 技术上可用 aws login，但不建议日常使用 root，
+                          请管理员为你创建 IAM 用户或联合角色
 ```
 
-整个过程中，**只有三件事需要你亲自做**：在控制台准备用户和权限集（步骤 1）、在浏览器中登录（步骤 5）、确认停用和删除哪些旧密钥（步骤 6）。其余的盘点、备份、改配置、验证、扫描，都可以交给 Kiro。
+| 对比 | 路径 A：`aws login` | 路径 B：IAM Identity Center（`sso-session`） |
+|---|---|---|
+| 登录身份 | 各账号的 IAM 用户，或经 IAM 联合的角色 | IAM Identity Center 中统一管理的身份 |
+| 多账号 | 每个 profile 分别登录 | 一次登录，覆盖所有已分配的账号 |
+| 额外准备 | 登录身份需附加托管策略 `SignInLocalDevelopmentAccess` | 无，账号和权限集由管理员分配 |
+| 会话 | 每 15 分钟自动刷新，最长为 IAM 主体的会话时长（上限 12 小时） | 由权限集会话时长和用户会话时长决定 |
 
----
+两条路径可以在同一台电脑上混用，每个 profile 只认自己的配置。
 
-## 实战步骤
+### 前提条件
 
-### 步骤 1：在 IAM Identity Center 中准备身份与权限
+**路径 A：aws login（用 IAM 用户或 IAM 联合角色，不用 IAM Identity Center）**
 
-以下操作由管理员在控制台完成，每个 Identity Center 实例只需做一次。
+1. 本机 AWS CLI 版本 2.32.0 或以上（`aws --version` 查看）。
+2. 你能用以下身份之一登录要迁移的那个账号的控制台：该账号中的 **IAM 用户**，或通过企业 IdP 直接联合到该账号的 **IAM 角色**。已经在用 IAM Identity Center 门户的，请走路径 B。
+3. 这个 IAM 用户、它所在的用户组或联合角色上附加了托管策略 `SignInLocalDevelopmentAccess`。
+4. 本机有浏览器；没有浏览器时，需要另一台能打开网页的设备（配合 `--remote`）。
 
-1. **启用 IAM Identity Center**：推荐使用组织实例（organization instance），参见 [Getting started](https://docs.aws.amazon.com/singlesignon/latest/userguide/getting-started.html)。
-2. **创建用户并开启 MFA**：在 *Settings → Authentication* 中配置多重身份验证。
-3. **创建权限集**：为日常运维准备满足需要的权限集，另外**单独准备一个只读权限集**（如 `ReadOnlyAccess`），给 AI 编码助手和巡检脚本使用。
-4. **设置会话时长**：权限集的会话时长默认为 1 小时，最长可设为 12 小时（参见 [Set session duration](https://docs.aws.amazon.com/singlesignon/latest/userguide/howtosessionduration.html)）。建议按工作习惯设为 4–8 小时，不要超过实际需要。另外注意区分 Identity Center 的**用户会话时长**（默认 8 小时）：它决定多久需要重新执行 `aws sso login`，在 *Settings → Authentication* 中设置，参见 [Configure the session duration](https://docs.aws.amazon.com/singlesignon/latest/userguide/configure-user-session.html)。
-5. **分配账号**：在 *AWS accounts* 中，把用户（或组）和权限集分配到目标账号。
+**路径 B：IAM Identity Center（用 Identity Center 用户，不用 IAM 用户）**
 
-> **中国区域**：亚马逊云科技中国（北京）区域和中国（宁夏）区域都支持 IAM Identity Center。访问门户地址形如 `https://start.<region>.home.awsapps.cn/directory/<别名>`（笔者宁夏区域实例的实际地址即为此格式；请以 Identity Center 控制台 *Settings* 页显示的地址为准），详见 [IAM Identity Center in Amazon Web Services China](https://docs.amazonaws.cn/en_us/aws/latest/userguide/iam-identity-center.html)。
+1. 本机 AWS CLI 版本 2.9.0 或以上。
+2. 组织已开通 IAM Identity Center，你有 Identity Center 用户，并能登录 access portal。
+3. 管理员已经把要用的账号和权限集分配给你，门户里能看到这些账号。
+4. 从门户任一账号的 *Access keys* 页面拿到 **SSO Start URL** 和 **SSO Region**。
 
-完成后，在访问门户（AWS access portal）的 *Access keys* 页面中记下 **SSO Start URL** 和 **SSO Region**，下一步要用。
+**两条路径通用**：步骤 5 停用、删除旧密钥时，需要 `iam:ListAccessKeys`、`iam:GetAccessKeyLastUsed`、`iam:UpdateAccessKey`、`iam:DeleteAccessKey` 权限。路径 A 是对自己这个 IAM 用户的权限；路径 B 的权限集需要能操作旧密钥所属的 IAM 用户。
 
-### 步骤 2：盘点并完整备份本机凭证
+### 先弄清两个文件：config 和 credentials
 
-动手之前，先把现状摸清楚，并做一份可以回退的完整备份。
+AWS CLI 从两个文件读取 profile，两者分工不同：
 
-```bash
-# 只列出段名，不显示密钥
-grep -n '^\[' ~/.aws/config ~/.aws/credentials
+| 文件 | 存什么 | 段名写法 | 本文中谁来改 |
+|---|---|---|---|
+| `~/.aws/config` | profile 的设置：区域、输出格式、`login_session`、`sso_session` 等登录方式 | `[default]`、`[profile dev]`、`[sso-session main-sso]` | **两条路径都由 CLI 自动写入，无需手动编辑**：路径 A 由 `aws login` 写入；路径 B 由 `aws configure sso` 向导写入（账号很多时也可用步骤 2 的可选脚本批量合并） |
+| `~/.aws/credentials` | 静态访问密钥：`aws_access_key_id`（`AKIA` 开头）和 `aws_secret_access_key` | `[default]`、`[dev]`（不带 `profile` 前缀） | **只删不加**：两条路径都要在步骤 3 删除迁移 profile 的同名段 |
 
-# 统计长期密钥数量（只显示前缀，不显示完整密钥 ID）
-grep -oE 'AKIA[0-9A-Z]{4}' ~/.aws/credentials | sort | uniq -c
-
-# 完整备份 ~/.aws 和 shell 启动文件：创建时即限制权限，只打包存在的文件，并做完整性自检
-TS=$(date +%Y%m%d-%H%M%S)
-cd ~ && ( umask 077
-  FILES=(.aws); for f in .zshrc .zprofile .zshenv .bash_profile .bashrc .profile; do [ -f "$f" ] && FILES+=("$f"); done
-  zip -r -q "aws-backup-$TS.zip" "${FILES[@]}" )
-unzip -tq "aws-backup-$TS.zip" && shasum -a 256 "aws-backup-$TS.zip"
-```
-
-✅ **检查点**：`unzip -t` 输出 `No errors detected`，记下备份文件的 sha256。
-
-⚠️ 备份包里有旧密钥的明文，以及有效期内的 SSO 令牌。不要把它放进会同步到云盘的目录，并留意 Time Machine 等备份工具也会把它带走。等步骤 6 在 IAM 中删除旧密钥、确认业务无影响后，就可以销毁这个备份包。
-
-### 步骤 3：编写 SSO 配置，并按段合并进 ~/.aws/config
-
-只有一个账号时，用向导 `aws configure sso` 就够了（参见 [AWS CLI 用户指南](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html)）。账号多、又想**保留原有 profile 名称**时，更推荐先写一个配置片段，再按段合并进 `~/.aws/config`。
-
-**3.1 编写配置片段 `sso.fragment`**
-
-下面的示例中，同一组织的三个账号共用一个 `sso-session`，中国区域单独一个：
+迁移前后，文件里的内容会这样变化（以 `default` profile 为例）：
 
 ```ini
-# ---------- 全球区域：同一组织下的生产 / 测试账号 ----------
+# 迁移前 ~/.aws/credentials：长期密钥明文
+[default]
+aws_access_key_id = AKIA****************
+aws_secret_access_key = ****************************************
+
+# 迁移后 ~/.aws/credentials：[default] 段已删除，文件可以为空
+
+# 迁移后 ~/.aws/config（路径 A，由 aws login 自动写入，不含任何密钥）
+[default]
+login_session = arn:aws:iam::444444444444:user/alice
+region = us-east-1
+
+# 迁移后 ~/.aws/config（路径 B，由 aws configure sso 向导自动写入，不含任何密钥）
 [sso-session main-sso]
 sso_start_url = https://d-1234567890.awsapps.com/start
 sso_region = us-east-1
@@ -210,134 +87,200 @@ sso_session = main-sso
 sso_account_id = 111111111111
 sso_role_name = AdministratorAccess
 region = us-east-1
+```
+
+临时凭证本身不写进这两个文件，而是由 CLI 缓存在 `~/.aws/login/cache/`（路径 A）或 `~/.aws/sso/cache/`、`~/.aws/cli/cache/`（路径 B），自动过期，不需要手动维护。
+
+⚠️ **`aws login` 不会删除 credentials 中的旧密钥。** 实测（AWS CLI 2.39.0）：同一个 profile 在 config 中有 `login_session`、在 credentials 中还留着静态密钥时，CLI 优先使用 credentials 中的静态密钥，`aws configure list` 显示凭证来源为 `shared-credentials-file`。登录看起来成功，实际仍在用旧密钥。所以步骤 3 必须手动删除。
+
+### 每一步做什么
+
+| 步骤 | 路径 A：执行的命令 | 路径 B：执行的命令 | 文件变化 | 自动还是手动 |
+|---|---|---|---|---|
+| 1 备份 | 备份脚本 | 同左 | 家目录生成 `aws-backup-*.zip` | 执行命令 |
+| 2 配置登录方式 | 无需操作（可选：旧工具兼容写法） | `aws configure sso`（每个账号一次，Profile name 输入原名称） | 路径 B 向导自动写入 config，并完成首次登录 | 执行命令，按提示输入 |
+| 3 删除静态密钥 | `neutralize_credentials.py`，检查环境变量 | 同左 | 删除 credentials 中的同名段；手动删 shell 启动文件里的密钥 | **两条路径都要手动处理** |
+| 4 登录并验证 | `aws login --profile <名称>` | 步骤 2 已登录的直接验证；会话过期时 `aws sso login --sso-session <名称>` | 路径 A 自动写入 config 的 `login_session` 和 `region`；两条路径都生成登录缓存 | 执行命令，浏览器确认 |
+| 5 停用删除旧密钥 | IAM 命令或控制台 | 同左 | 本机文件无变化，密钥在 IAM 中作废 | 执行命令或控制台 |
+| 6 日常使用 | `aws login` / `aws logout` | `aws sso login` / `aws sso logout` | 仅更新缓存 | 执行命令 |
+
+> **中国区域**：中国区域的账号、凭证与全球区域相互独立，两边各配各的 profile。**中国区域目前只能用路径 B。** `aws login` 的[发布公告](https://aws.amazon.com/about-aws/whats-new/2025/11/console-credentials-aws-cli-sdk-authentication/)写明适用于所有商业区域，未提及中国区域；在中国区域执行 `aws login --profile <名称>`（区域为 `cn-north-1`）会打开 `cn-north-1.signin.amazonaws.cn` 的登录页，但返回 500 错误。中国区域请使用 IAM Identity Center（北京、宁夏区域均可用），按路径 B 用 `aws configure sso` 配置。
+
+下文标注 **【A】**、**【B】** 的部分只看自己那条路径，其余为通用步骤。
+
+> ⚠️ **注意区域：文中示例默认使用 `us-east-1`，请换成你自己的区域。** 中国区域填 `cn-north-1`（北京）或 `cn-northwest-1`（宁夏）。
+
+---
+
+## 步骤 1：完整备份本机凭证
+
+```bash
+TS=$(date +%Y%m%d-%H%M%S)
+cd ~ && ( umask 077
+  FILES=(.aws); for f in .zshenv .zshrc .zprofile .bash_profile .bashrc .profile; do [ -f "$f" ] && FILES+=("$f"); done
+  zip -r -q "aws-backup-$TS.zip" "${FILES[@]}" )
+unzip -tq "aws-backup-$TS.zip" && shasum -a 256 "aws-backup-$TS.zip"
+```
+
+✅ **检查点**：输出 `No errors detected`，记下备份文件名和 sha256。后续步骤会重开终端，`$TS` 变量届时不再可用，需要时用 `ls ~/aws-backup-*.zip` 查找。
+
+⚠️ 备份包里有旧密钥的明文，不要放进云盘同步目录。步骤 5 删除旧密钥、确认业务无影响后，销毁这个备份包。
+
+---
+
+## 步骤 2：配置新的登录方式
+
+### 【A】aws login：无需手动写 config
+
+1. 确认前提条件 3：在 IAM 控制台为自己的 IAM 用户、用户组或联合角色附加 AWS 托管策略 `SignInLocalDevelopmentAccess`。没有权限时，请管理员代为附加。
+2. **不需要手动编辑 `~/.aws/config`。** 步骤 4 执行 `aws login --profile <名称>` 后，CLI 会自动在 config 中写入这个 profile 的 `login_session`；profile 还没有区域时，CLI 会提示输入并一并写入。用原来的 profile 名称登录（例如 `default`、`dev`），现有脚本无需修改。
+
+> ⚠️ **注意：CLI 提示 `AWS Region [us-east-1]` 时，方括号里的 `us-east-1` 只是默认值，请输入你常用的区域，不要直接回车。**
+
+可选：有不支持 aws login 的旧 SDK 或工具时，才需要手动在 config 中加一段 `credential_process`，让旧工具继续用原 profile 名，由 CLI 代为提供凭证：
+
+```ini
+[profile dev-login]
+# 实际登录用这个 profile：aws login --profile dev-login
+region = us-east-1
+
+[profile dev]
+credential_process = aws configure export-credentials --profile dev-login --format process
+region = us-east-1
+```
+
+采用这种写法时，步骤 4 登录的是 `dev-login`（`aws login --profile dev-login`），验证和日常使用仍用 `dev`。路径 A 做完这一步直接进入步骤 3。
+
+### 【B】sso-session：用向导 `aws configure sso`，无需手动写 config
+
+前提条件见前文路径 B。先在 access portal 任一账号的 *Access keys* 页面记下 **SSO Start URL** 和 **SSO Region**，然后运行向导，按提示输入。向导会自动把 `sso-session` 段和 profile 段写入 `~/.aws/config`。
+
+> ⚠️ **注意：向导会问两个区域，含义不同，不要填混。示例都是 `us-east-1`，请按自己的情况替换。**
+
+| 向导提示                        | 填什么                                                               | 能否自己选          |
+| --------------------------- | ----------------------------------------------------------------- | -------------- |
+| **`SSO region`**            | IAM Identity Center 实例所在的区域，以门户 *Access keys* 页面显示的 SSO Region 为准 | **不能**，填错会无法登录 |
+| **`Default client Region`** | 调用 API 的默认区域                                                      | 可以，填你常用的区域     |
+
+
+```console
+$ aws configure sso
+SSO session name (Recommended): main-sso
+SSO start URL [None]: https://d-1234567890.awsapps.com/start
+SSO region [None]: us-east-1
+SSO registration scopes [sso:account:access]:
+Attempting to automatically open the SSO authorization page in your default browser.
+...
+There are 2 AWS accounts available to you.
+> 111111111111 (prod)
+Using the account ID 111111111111
+The only role available to you is: AdministratorAccess
+Using the role name "AdministratorAccess"
+Default client Region [None]: us-east-1
+CLI default output format (json if not specified) [None]: json
+Profile name [AdministratorAccess-111111111111]: prod
+```
+
+- **最后一项 Profile name 要输入原来的 profile 名称**（例如 `prod`、`default`），不要用向导给的默认名，这样现有脚本无需修改。
+- 向导过程中会打开浏览器完成一次登录，所以这个 profile 已经登录过，步骤 4 只需验证。
+- 有多个账号时，每个账号运行一次向导。再次运行时 SSO session name 输入同一个名称（例如 `main-sso`），向导会复用已有的 `sso-session`，多个 profile 共享一次登录。
+- 中国区域再运行一次向导，用另一个 SSO session name，门户地址形如 `https://start.<region>.home.awsapps.cn/directory/<别名>`，以门户显示为准。
+
+向导写入 config 的结果如下，无需手动编辑：
+
+```ini
+[sso-session main-sso]
+sso_start_url = https://d-1234567890.awsapps.com/start
+sso_region = us-east-1
+sso_registration_scopes = sso:account:access
 
 [profile prod]
 sso_session = main-sso
 sso_account_id = 111111111111
 sso_role_name = AdministratorAccess
 region = us-east-1
-
-[profile prod-readonly]
-sso_session = main-sso
-sso_account_id = 111111111111
-sso_role_name = ReadOnlyAccess
-region = us-east-1
-
-[profile staging]
-sso_session = main-sso
-sso_account_id = 222222222222
-sso_role_name = PowerUserAccess
-region = ap-southeast-1
-
-# ---------- 中国区域：独立的 Identity Center 实例 ----------
-[sso-session china-sso]
-sso_start_url = https://start.cn-northwest-1.home.awsapps.cn/directory/example-alias
-sso_region = cn-northwest-1
-sso_registration_scopes = sso:account:access
-
-[profile china]
-sso_session = china-sso
-sso_account_id = 333333333333
-sso_role_name = AdministratorAccess
-region = cn-north-1
-
-[profile china-nx]
-sso_session = china-sso
-sso_account_id = 333333333333
-sso_role_name = AdministratorAccess
-region = cn-northwest-1
+output = json
 ```
 
-要点：
+**可选：账号很多时批量写入。** 有十几个 profile、逐个跑向导太慢时，可以把上面这样的内容写成配置片段 `sso.fragment`，用下面的脚本一次合并进 `~/.aws/config`。只用向导的读者跳过这部分，直接进入步骤 3。
 
-- **profile 名称沿用原来的**。脚本里的 `--profile prod`、Terraform 的 `profile = "prod"`、`export AWS_PROFILE=prod` 都无需修改。
-- **默认 profile** 按惯例写作 `[default]`，其他 profile 写作 `[profile 名称]`。
-- **profile 的默认区域可以与门户所在区域不同**。例如上面的 `china` 门户在宁夏，默认操作北京区域的资源。
-- **原有段中的自定义设置要带过来**。如果原来的 `[profile prod]` 里有 `output`、`cli_pager` 等设置，请一并写入片段。
+- 原有 profile 中的 `output`、`cli_pager` 等自定义设置要一并写进片段，因为同名段会被整段替换。
 
-**3.2 按段合并（示例脚本 `merge_config.py`）**
-
-合并规则：与片段**同名的段整段替换，其他段原样保留**。脚本可以重复执行，并支持先预览差异。
+脚本按段合并：**同名段整段替换，其他段原样保留**，可重复执行。替换进来的段会排到文件末尾，段的顺序不影响 CLI 解析。现有 config 中如有重复的同名段，脚本会提示并停止，请先手动合并。
 
 ```python
 #!/usr/bin/env python3
-"""把 SSO 配置片段合并进 ~/.aws/config：同名段整段替换，其余段原样保留。
-用法：python3 merge_config.py sso.fragment [--dry-run]"""
+"""把 SSO 配置片段按段合并进 ~/.aws/config。用法：python3 merge_config.py sso.fragment [--dry-run]"""
 import difflib, os, re, sys
 
-SEC = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-
-def parse(text):
-    """返回 (文件头部, [(段名, [该段的行...]), ...])"""
-    head, secs = [], []
-    for line in text.splitlines(keepends=True):
-        m = SEC.match(line)
+def parse(text):                     # {段名: 段文本}，保持原顺序
+    secs, name = {"": ""}, ""
+    for line in text.splitlines(True):
+        m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
         if m:
             name = re.sub(r"\s+", " ", m.group(1).strip())
-            secs.append(("default" if name == "profile default" else name, [line]))   # 两种写法等价
-        elif secs:
-            secs[-1][1].append(line)
-        else:
-            head.append(line)
-    return head, secs
+            name = "default" if name == "profile default" else name   # 两种写法等价
+            if name in secs:         # 重复段若直接覆盖，前一段会被静默丢弃
+                sys.exit(f"发现重复的段 [{name}]，请先手动合并后再运行")
+            secs[name] = ""
+        secs[name] += line
+    return secs
 
-frag_path, dry = sys.argv[1], "--dry-run" in sys.argv
-cfg = os.path.realpath(os.path.expanduser("~/.aws/config"))   # 若是指向 dotfiles 的符号链接，写回真实文件
-os.makedirs(os.path.dirname(cfg), mode=0o700, exist_ok=True)
+cfg = os.path.realpath(os.path.expanduser("~/.aws/config"))
 old = open(cfg, encoding="utf-8").read() if os.path.exists(cfg) else ""
-frag = open(frag_path, encoding="utf-8").read()
+frag, cur = parse(open(sys.argv[1], encoding="utf-8").read()), parse(old)
+frag.pop("")
+kept = {n: t for n, t in cur.items() if n not in frag}
+out = ("".join(kept.values()).rstrip("\n") + "\n\n" + "".join(frag.values())).lstrip("\n")
 
-frag_head, frag_secs = parse(frag)
-names = {n for n, _ in frag_secs}
-# 片段开头的注释行在合并后会落到上一段末尾；重跑前先去掉，保证可重复执行
-drop = {l for l in frag_head if l.strip()}
-head, old_secs = parse("".join(l for l in old.splitlines(True) if l not in drop))
-kept = [(n, b) for n, b in old_secs if n not in names]
-body = ("".join(head) + "".join("".join(b) for _, b in kept)).rstrip("\n")
-out = body + "\n\n" + frag if body.strip() else frag
-
-print("整段替换：", sorted(names & {n for n, _ in old_secs}) or "无")
-print("原样保留：", [n for n, _ in kept] or "无")
-if dry:
-    sys.stdout.writelines(difflib.unified_diff(
-        old.splitlines(True), out.splitlines(True), "config（当前）", "config（合并后）"))
+print("整段替换：", sorted(set(frag) & set(cur)) or "无")
+print("原样保留：", [n for n in kept if n] or "无")
+if "--dry-run" in sys.argv:
+    sys.stdout.writelines(difflib.unified_diff(old.splitlines(True), out.splitlines(True), "当前", "合并后"))
 elif out != old:
     with open(cfg + ".tmp", "w", encoding="utf-8") as f:
         f.write(out)
     os.chmod(cfg + ".tmp", 0o600)
-    os.replace(cfg + ".tmp", cfg)          # 原子替换，避免写到一半
+    os.replace(cfg + ".tmp", cfg)    # 原子替换
     print("已写入", cfg)
 ```
 
+▶ **命令演示**
+
 ```bash
-python3 merge_config.py sso.fragment --dry-run   # 先预览
-python3 merge_config.py sso.fragment             # 确认无误后正式写入
+$ python3 merge_config.py sso.fragment --dry-run
+整段替换： ['profile prod']
+原样保留： ['default', 'profile legacy-tool']
+--- 当前
++++ 合并后
+...
+$ python3 merge_config.py sso.fragment
+已写入 /Users/alice/.aws/config
 ```
 
-✅ **检查点**：预览输出中，"整段替换"只包含你打算迁移的 profile；"原样保留"里没有被误伤的段。
+✅ **检查点**：“整段替换”只包含你打算迁移的 profile，“原样保留”里没有被误伤的段。
 
-> 被整段替换的段，其中的注释也会一起被替换掉；需要保留的注释，请写进配置片段。
+---
 
-### 步骤 4：清理 credentials 中的同名静态段
+## 步骤 3：删掉 credentials 中的同名静态段
 
-这是最容易漏掉的一步。在同一个 profile 内，AWS CLI 会先尝试 SSO 配置，再读 `~/.aws/credentials` 里的静态密钥。所以 SSO 配置写对时，SSO 优先生效（SSO 配置缺项时 CLI 会直接报错，不会悄悄改用静态密钥）。真正的陷阱在于：如果某个 profile 在 config 里**根本没有生效的 SSO 配置**，例如片段里的 profile 名称与原来的拼写不一致，或者原来写的是 `[profile default]`、片段里写的是 `[default]` 而没有合并上，CLI 就会**静默使用** credentials 里的同名静态密钥。表现为看起来一切正常，`sts get-caller-identity` 返回的却是 `user/xxx`，而不是 SSO 角色。更重要的是，只要静态段还在，长期密钥就仍然以明文躺在硬盘上。
+**两条路径都必须做这一步，而且只能手动做：`aws login` 和 `aws sso login` 都不会改动 `~/.aws/credentials`。**
 
-**示例脚本 `neutralize_credentials.py`**：只删除指定的段，不打印任何密钥内容。
+- **路径 A**：静态密钥的优先级高于 `login_session`。只要 credentials 中还有同名段，即使 `aws login` 成功，CLI 仍然使用旧的 `AKIA` 密钥（见前文实测）。
+- **路径 B**：SSO 配置生效时 CLI 会优先用 SSO；但只要某个 profile 的新配置没有生效（例如名称拼写不一致），CLI 会**静默改用**同名静态密钥。
+- 两条路径下，只要静态段还在，长期密钥就仍以明文躺在硬盘上。
+
+要删的是 credentials 中与迁移 profile **同名**的段，例如 `[default]`、`[dev]`。没有迁移的 profile 保持不动。
 
 ```python
 #!/usr/bin/env python3
-"""删除 ~/.aws/credentials 中与 SSO profile 同名的静态密钥段。
-用法：python3 neutralize_credentials.py default prod prod-readonly staging china china-nx [--dry-run]"""
+"""删除 ~/.aws/credentials 中指定的段，不打印密钥。用法：python3 neutralize_credentials.py prod dev [--dry-run]"""
 import os, re, sys
 
-targets = {a for a in sys.argv[1:] if a != "--dry-run"}
-dry = "--dry-run" in sys.argv
+targets = set(sys.argv[1:]) - {"--dry-run"}
 path = os.path.expanduser("~/.aws/credentials")
-if not os.path.exists(path):
-    sys.exit("credentials 文件不存在，无需处理")
-
 out, dropped, skip = [], [], False
-for line in open(path, encoding="utf-8").read().splitlines(keepends=True):
+for line in open(path, encoding="utf-8"):
     m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
     if m:
         skip = m.group(1).strip() in targets
@@ -347,7 +290,8 @@ for line in open(path, encoding="utf-8").read().splitlines(keepends=True):
         out.append(line)
 
 print("将删除的段：", dropped or "无")
-if dropped and not dry:
+print("未找到：", sorted(targets - set(dropped)) or "无")   # 名称拼错时在这里暴露
+if dropped and "--dry-run" not in sys.argv:
     with open(path + ".tmp", "w", encoding="utf-8") as f:
         f.writelines(out)
     os.chmod(path + ".tmp", 0o600)
@@ -355,250 +299,263 @@ if dropped and not dry:
     print("已写入", path)
 ```
 
-暂时无法迁移的其他段先保留，步骤 6 再统一处理。
+▶ **命令演示**
 
-另外检查 shell 启动文件和项目目录里有没有硬编码的密钥环境变量。环境变量的优先级高于所有 profile 配置：
-
-```bash
-grep -nE '(export[[:space:]]+)?AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|SECURITY_TOKEN)[[:space:]]*=' \
-  ~/.zshrc ~/.zprofile ~/.zshenv ~/.zlogin ~/.bash_profile ~/.bashrc ~/.profile \
-  ./.envrc ./.env 2>/dev/null | sed -E 's/=.*/=***/'
-unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+```console
+$ python3 neutralize_credentials.py prod dev --dry-run
+将删除的段： ['prod', 'dev']
+未找到： 无
+$ python3 neutralize_credentials.py prod dev
+将删除的段： ['prod', 'dev']
+未找到： 无
+已写入 /Users/alice/.aws/credentials
 ```
 
-`unset` 只对当前终端生效。扫出来的行，需要到对应文件里手动删除，然后重新打开终端。
+✅ **检查点**：“未找到”为“无”。如果列出了名称，说明 profile 名称与 credentials 中的段名不一致，先核对再继续。
 
-### 步骤 5：登录，并逐个 profile 验证
+环境变量的优先级高于所有 profile，也要检查 shell 启动文件：
 
-每个 `sso-session` 登录一次：
-
-```bash
-aws sso login --sso-session main-sso
-aws sso login --sso-session china-sso
-# 通过 SSH 远程操作、本机没有浏览器时，加 --use-device-code
+```console
+$ grep -nE 'AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)[[:space:]]*=' \
+    ~/.zshenv ~/.zshrc ~/.zprofile ~/.bash_profile ~/.bashrc ~/.profile 2>/dev/null | sed -E 's/=.*/=***/'
+/Users/alice/.zshrc:42:export AWS_ACCESS_KEY_ID=***
 ```
 
-在浏览器中依次完成：登录 → MFA → **Allow access** → 看到 *Request approved*。
+扫出来的行到对应文件里手动删除，然后重新打开终端。使用 direnv 的，项目目录下的 `.envrc` 也可能写有密钥，一并检查。
 
-> 💡 如果浏览器自动带入了另一个用户的登录会话，可以加上 `--no-browser`，把命令输出的链接复制到**本机**浏览器的无痕窗口中打开。AWS CLI 从 2.22.0 起默认使用 PKCE 授权，这个链接必须在运行 CLI 的同一台设备上打开；需要在另一台设备上完成授权时，请改用 `--use-device-code`。
+**回滚**：如果步骤 4 登录或验证失败、需要临时恢复旧密钥，从备份中恢复 credentials 文件：
 
-**示例脚本 `verify.sh`**：逐个 profile 同时核对三项——**账号 ID 正确、身份是 SSO 角色、拿到的是 `ASIA` 临时凭证**。脚本不显示完整凭证。
+```console
+$ ls ~/aws-backup-*.zip
+/Users/alice/aws-backup-20261125-101500.zip
+$ unzip -o ~/aws-backup-20261125-101500.zip .aws/credentials -d ~
+```
+
+问题排查完后重新执行本步骤。
+
+---
+
+## 步骤 4：登录并验证
+
+▶ **【A】命令演示**：每个 profile 登录一次（采用 credential_process 写法的，登录 `dev-login`）
+
+```console
+$ aws login --profile dev
+Attempting to open the login page for `us-east-1` in your default browser.
+...
+```
+
+在浏览器中选择控制台身份（或重新登录并完成 MFA）后回到终端。本机没有浏览器时，用 `aws login --profile dev --remote`，在其他设备上打开链接，再把授权码粘贴回终端。
+
+登录成功后，CLI 自动在 `~/.aws/config` 中写入（无需手动编辑）：
+
+```ini
+[profile dev]
+login_session = arn:aws:iam::444444444444:user/alice
+region = us-east-1
+```
+
+用 `default` profile 时执行 `aws login`（或 `aws login --profile default`），写入的是 `[default]` 段。`~/.aws/credentials` 不会被改动，所以步骤 3 删除静态段这一步不能省。用下面的命令确认凭证来源已不是 `shared-credentials-file`：
+
+```console
+$ aws configure list --profile dev
+```
+
+▶ **【B】命令演示**：步骤 2 运行向导时已经登录过的，跳过登录直接验证；会话过期或用脚本批量写入的，每个 sso-session 登录一次
+
+```console
+$ aws sso login --sso-session main-sso
+Attempting to automatically open the SSO authorization page in your default browser.
+...
+Successfully logged into Start URL: https://d-1234567890.awsapps.com/start
+```
+
+在浏览器中依次完成：登录 → MFA → **Allow access**。本机没有浏览器时，加 `--use-device-code`。
+
+**验证（通用）**：逐个 profile 核对账号 ID、是否拿到 `ASIA` 开头的临时凭证；路径 B 还要核对是否为 `AWSReservedSSO_` 角色。
 
 ```bash
 #!/usr/bin/env bash
-# 逐个 profile 核对：账号 ID、SSO 角色、临时凭证（只读）
+# verify.sh：格式为 profile 名:期望的账号 ID:类型（sso = 路径 B；login = 路径 A）
+CHECKS="prod:111111111111:sso dev:444444444444:login"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
-# 格式：profile 名:期望的账号 ID
-CHECKS="default:111111111111 prod:111111111111 prod-readonly:111111111111 \
-staging:222222222222 china:333333333333 china-nx:333333333333"
-
-pass=0; fail=0
+fail=0
 for item in $CHECKS; do
-  p="${item%%:*}"; want="${item##*:}"
+  IFS=: read -r p want kind <<< "$item"
   read -r acct arn <<< "$(aws sts get-caller-identity --profile "$p" \
       --query '[Account,Arn]' --output text 2>/dev/null)"
-  kid="$(aws configure export-credentials --profile "$p" --format process 2>/dev/null \
-      | grep -oE '"AccessKeyId": *"[A-Z]{4}' | grep -oE '[A-Z]{4}$')"
-  if [ "$acct" = "$want" ] && [[ "$arn" == *":assumed-role/AWSReservedSSO_"* ]] && [ "$kid" = "ASIA" ]; then
-    echo "PASS  $p  $arn"; pass=$((pass + 1))
+  kid=$(aws configure export-credentials --profile "$p" --format process 2>/dev/null \
+      | grep -oE '"AccessKeyId": *"[A-Z]{4}' | grep -oE '[A-Z]{4}$')
+  if [ "$acct" = "$want" ] && [ "$kid" = "ASIA" ] &&
+     { [ "$kind" != sso ] || [[ "$arn" == *":assumed-role/AWSReservedSSO_"* ]]; }; then
+    echo "PASS  $p  $arn"
   else
     echo "FAIL  $p  account=${acct:-?}  arn=${arn:-?}  key=${kid:-?}"; fail=$((fail + 1))
   fi
 done
-grep -qE 'AKIA[0-9A-Z]{16}' ~/.aws/credentials 2>/dev/null \
-  && echo "提示：credentials 中仍有长期密钥，请继续完成步骤 6"
-echo "PASS=${pass}  FAIL=${fail}"
-[ "$fail" -eq 0 ]
+echo "FAIL=${fail}"; [ "$fail" -eq 0 ]
 ```
 
-期望输出类似：
+▶ **命令演示**
 
-```
+```console
+$ chmod +x verify.sh
+$ ./verify.sh
 PASS  prod  arn:aws:sts::111111111111:assumed-role/AWSReservedSSO_AdministratorAccess_0123456789abcdef/alice
-PASS  china arn:aws-cn:sts::333333333333:assumed-role/AWSReservedSSO_AdministratorAccess_0123456789abcdef/alice
-PASS=6  FAIL=0
+PASS  dev   arn:aws:iam::444444444444:user/alice
+FAIL=0
 ```
 
 ✅ **检查点**：所有 profile 都显示 `PASS`。
 
-常见的 `FAIL` 原因：
-- 显示 `key=AKIA`：说明这个 profile 在 config 中没有生效的 SSO 配置，CLI 用的是 credentials 里的同名静态段。检查步骤 3 片段里的 profile 名称，并完成步骤 4。
-- `account` 为空：说明还没有登录，或者该账号没有分配权限集，回到步骤 1 或重新登录。
-
-> ARN 末尾的会话名不一定是登录时输入的用户名，也可能是邮箱，这是正常的。所以脚本只核对账号 ID 和角色前缀，不核对用户名。
-
-### 步骤 6：在 AWS 侧停用并删除旧的长期密钥
-
-**只删除本机文件，并不等于密钥失效。** 密钥的副本可能还留在其他电脑、旧备份或聊天记录里。只有在 IAM 中停用并删除，这把密钥才算真正作废。
-
-**6.1 先在账号层面盘点，并记下"最近使用时间"**
-
-先做这一步，再做 6.2 的有效性核查。原因是 6.2 会用旧密钥调用一次 API，这会刷新该密钥的"最近使用时间"，之后就无法再据此判断它是否还在被别的程序使用。
-
-用刚配置好的 SSO profile 生成 [IAM 凭证报告](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_getting-report.html)：
-
-```bash
-aws iam generate-credential-report --profile prod
-# 报告生成需要几秒钟；如果提示 ReportNotPresent 或 ReportInProgress，稍等后再执行下一条
-aws iam get-credential-report --profile prod --query Content --output text | base64 --decode \
-  | awk -F, 'NR==1 || tolower($9)=="true" || tolower($14)=="true" {print $1","$9","$11","$14","$16}'
-# 输出列：用户名, key1 是否启用, key1 最近使用时间, key2 是否启用, key2 最近使用时间
-
-# 对要处理的每把密钥，记下它的最近使用时间和服务
-aws iam get-access-key-last-used --access-key-id <ACCESS_KEY_ID> --profile prod
-```
-
-盘点时注意四点：
-
-- **凭证报告只覆盖当前账号**。有多个账号时，用对应的 profile 逐个账号执行。
-- **凭证报告只包含每个用户的前两把访问密钥**。需要完整核对时，对相关用户执行 `aws iam list-access-keys --user-name <用户名>`。
-- **报告中的 `<root_account>` 一行**如果显示有启用的访问密钥，说明 root 用户还有长期密钥。root 密钥不能用 `--user-name` 处理，需要以 root 身份登录控制台删除。
-- **迁移后不再有人使用的 IAM 用户**，除了删除访问密钥，还要删除控制台密码（登录配置）和 MFA 设备，或者直接删除该用户。
-
-也可以启用 [IAM Access Analyzer 的未使用访问分析](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-findings.html)，持续找出在指定时间窗口内没有被使用过的 IAM 用户访问密钥和密码。这需要单独创建未使用访问分析器，属于付费功能，启用前请先查看计费说明。
-
-**6.2 只读核查本机剩余的密钥是否仍然有效**
-
-```bash
-for p in $(grep -oE '^\[[^]]+\]' ~/.aws/credentials | tr -d '[]'); do
-  printf '%-25s ' "$p"
-  aws sts get-caller-identity --profile="$p" --query Arn --output text 2>&1 | tail -1
-done
-```
-
-- 返回 ARN：密钥仍然有效，按 6.3 处理。
-- 返回 `InvalidClientTokenId`：密钥已失效，可以直接从文件中删除这一段。
-
-> 注意写成 `--profile=NAME`。如果 profile 名称以 `-` 开头，用空格分隔的写法会被 CLI 当成参数来解析。
-
-**6.3 先停用，观察一段时间后再删除**
-
-```bash
-aws iam update-access-key --user-name ops-user --access-key-id <ACCESS_KEY_ID> \
-  --status Inactive --profile prod
-# 观察 1–2 周，确认业务没有受到影响后，再删除
-aws iam delete-access-key --user-name ops-user --access-key-id <ACCESS_KEY_ID> --profile prod
-```
-
-> 停用（Inactive）随时可以恢复，删除则不可恢复。拿不准用途的密钥，先停用，确认没有影响后再删除。
-
-**6.4 清理本机残留的明文密钥**
-
-除了 `~/.aws`，明文密钥还常常藏在 shell 配置和历史记录、IDE 设置、工具配置、项目里的 `.env` 和 tfvars、旧备份文件以及 AI 编码助手的会话记录里。下面的命令只读扫描常见位置，并对结果打码：
-
-```bash
-grep -rIoEn --exclude-dir=node_modules --exclude-dir=.git 'AKIA[0-9A-Z]{16}' \
-  ~/.aws ~/.config ~/.kiro ~/.claude \
-  ~/.zshrc ~/.zprofile ~/.zshenv ~/.bash_profile ~/.bashrc ~/.profile \
-  ~/.zsh_history ~/.bash_history \
-  ~/Library/Application\ Support/*/User/settings.json 2>/dev/null \
-  | sed -E 's/(AKIA)[0-9A-Z]{12}/\1************/' | sort -u
-```
-
-这只是示例，请按自己使用的工具补充路径，并对代码仓库单独扫描（包括 git 历史）。注意这条命令只匹配以 `AKIA` 开头的密钥 ID；与之配对的 40 位私有访问密钥没有固定前缀，用 grep 很难可靠识别，建议配合 [git-secrets](https://github.com/awslabs/git-secrets) 或 trufflehog 这类专门工具。
-
-扫描结果的处理方式：
-- 已停用或已删除的密钥：直接删掉这一行。
-- 写死在脚本或配置里的密钥：改为 `--profile <名称>` 或 `AWS_PROFILE=<名称>`。
-- 要删除的旧备份文件：先确认它已经包含在步骤 2 的备份包里。
-
-### 步骤 7：日常使用与单会话缓存清除
-
-迁移完成后，日常只需要记住三条命令：
-
-```bash
-aws sso login --sso-session main-sso     # 每天第一次使用，或看到 "Token has expired" 时
-aws s3 ls --profile prod                 # 与迁移前的用法完全相同
-aws configure export-credentials --profile prod | grep Expiration   # 查看临时凭证的到期时间（UTC）
-```
-
-**关于退出**：根据 [命令参考](https://docs.aws.amazon.com/cli/latest/reference/sso/logout.html)，`aws sso logout` 会清除本机**所有** profile 缓存的 IAM Identity Center 访问令牌，以及通过它们获取的临时凭证。如果你同时登录了全球区域和中国区域，又只想清除其中一个会话的本地缓存，可以使用下面的脚本。
-
-**示例脚本 `logout-one.sh`**：
-
-```bash
-#!/usr/bin/env bash
-# 只清除一个 sso-session 的本地令牌缓存，其他会话保持登录。用法：./logout-one.sh china-sso
-S="${1:?请指定 sso-session 名称}"
-# sso-session 的令牌缓存文件名，是该会话名称的 SHA-1 值
-TOKEN="$HOME/.aws/sso/cache/$(printf %s "$S" | shasum | cut -d' ' -f1).json"
-[ -f "$TOKEN" ] && rm -f "$TOKEN" && echo "已清除 ${S} 的访问令牌缓存"
-# 清除所有 SSO 角色的临时凭证缓存；其他会话会在下次调用时用各自的令牌自动重新获取
-grep -lE '"ProviderType": ?"sso"' "$HOME"/.aws/cli/cache/*.json 2>/dev/null | xargs rm -f
-```
-
-> 这个脚本依赖 AWS CLI 的缓存实现：令牌缓存文件名是会话名称的 SHA-1 值，临时凭证缓存中带有 `"ProviderType": "sso"` 字段。笔者在 AWS CLI 2.39.3 上核对过，这两点都不是官方承诺的接口，升级 CLI 后请复测。
->
-> 无论是 `aws sso logout` 还是这个脚本，都只清除本地缓存。如果需要立即终止某个用户的会话（例如设备丢失），管理员可以在 IAM Identity Center 控制台[结束该用户的活动会话](https://docs.aws.amazon.com/singlesignon/latest/userguide/end-active-sessions.html)。需要同时切断已签发的角色临时凭证时，参见 [Revoke active IAM role sessions created by permission sets](https://docs.aws.amazon.com/singlesignon/latest/userguide/revoke-user-permissions.html)。
+- 显示 `key=AKIA`：这个 profile 的新配置没有生效，用的仍是静态密钥，检查 profile 名称并重做步骤 3。
+- `account` 为空：还没登录或会话已过期；路径 B 还可能是该账号没有分配权限集。
 
 ---
 
-## 迁移效果
+## 步骤 5：在 IAM 中停用并删除旧密钥
 
-| 目标 | 达成情况 | 验证方式 |
+**只删除本机文件，并不等于密钥失效。** 密钥副本可能还留在其他电脑、旧备份或聊天记录里，只有在 IAM 中删除才算真正作废。
+
+▶ **命令演示**：用步骤 4 配好的新 profile 操作自己的密钥（不加 `--user-name` 即表示当前 IAM 用户）
+
+```console
+$ aws iam list-access-keys --profile dev --query 'AccessKeyMetadata[].[AccessKeyId,Status]' --output text
+AKIAQ3EX************    Active
+$ aws iam get-access-key-last-used --access-key-id <ACCESS_KEY_ID> --profile dev \
+    --query 'AccessKeyLastUsed.[LastUsedDate,ServiceName]' --output text
+2026-11-20T08:15:00+00:00    s3
+$ aws iam update-access-key --access-key-id <ACCESS_KEY_ID> --status Inactive --profile dev
+$ # 观察 1–2 周，确认业务无影响后再删除
+$ aws iam delete-access-key --access-key-id <ACCESS_KEY_ID> --profile dev
+```
+
+- **用“最近使用时间”判断是否还有别处在用**：迁移完成后记下这个时间，停用前再查一次。如果时间晚于本机迁移的时间，说明还有其他电脑或程序在用这把密钥，要先找到它再停用。最近使用时间的更新有延迟，观察期不要太短。
+- 上面的演示用路径 A 的 `aws login` 会话调用 IAM API。如果你的环境返回权限错误，改在 IAM 控制台“安全凭证”页完成停用和删除。
+- **先停用、后删除**：停用随时可以恢复，删除不可恢复。处理别人的密钥时加 `--user-name <用户名>`（路径 B 的 SSO 角色不是 IAM 用户本人，必须加）。
+- 管理员盘点整个账号，用 [IAM 凭证报告](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_getting-report.html)，并逐个账号执行；root 用户的访问密钥需以 root 身份登录控制台删除。
+- 路径 A 的 IAM 用户仍用于控制台登录，只删除它的访问密钥，不要删除用户。
+
+最后扫描本机其他位置残留的明文密钥 ID（结果已打码）：
+
+```console
+$ grep -rIoE --exclude-dir=node_modules --exclude-dir=.git 'AKIA[0-9A-Z]{16}' \
+    ~/.aws ~/.config ~/.kiro ~/.zshrc ~/.bashrc ~/.zsh_history ~/.bash_history 2>/dev/null \
+    | sed -E 's/(AKIA)[0-9A-Z]{12}/\1************/' | sort -u
+/Users/alice/.zsh_history:AKIA************WXYZ
+```
+
+shell 历史里更危险的是密钥本身，再列出含有 secret 字样的文件（只显示文件名）：
+
+```console
+$ grep -rIlE --exclude-dir=node_modules --exclude-dir=.git 'aws_secret_access_key|AWS_SECRET_ACCESS_KEY' \
+    ~/.aws ~/.config ~/.kiro ~/.zshenv ~/.zshrc ~/.bashrc ~/.zsh_history ~/.bash_history 2>/dev/null
+/Users/alice/.zsh_history
+```
+
+已删除的密钥直接删掉该行；写死在脚本里的改为 `--profile <名称>`。代码仓库（含 git 历史）建议用 [git-secrets](https://github.com/awslabs/git-secrets) 等专门工具扫描。
+
+---
+
+## 步骤 6：日常使用与退出
+
+| 场景 | 【A】aws login | 【B】sso-session |
 |---|---|---|
-| 工作站不保存长期密钥 | 托管账号的访问密钥已从 `~/.aws/credentials` 移除，并在 IAM 中停用、删除 | `verify.sh` 全部 PASS；步骤 6.4 扫描范围内结果为空 |
-| 凭证自动过期 | 每次调用使用的都是 `ASIA` 临时凭证，按权限集会话时长自动失效 | `aws configure export-credentials` 中的 `Expiration` |
-| 本地文件外泄的影响有时限 | 本机只剩有时效的令牌和临时凭证，泄露后的可用窗口受会话时长限制，不再有永不过期的密钥 | 同上；会话时长设置 |
-| 登录受 MFA 保护 | 获取凭证必须由本人在浏览器中完成身份验证 | Identity Center 的 MFA 设置 |
-| 人员变动一处处理 | 在 Identity Center 停用用户，即可收回该用户在所有账号的访问 | Identity Center → Users |
-| 现有工作方式不变 | profile 名称、脚本、Terraform、CDK 都无需修改 | `aws s3 ls --profile <原名称>` |
-| 可回退 | 迁移前已完整备份并通过自检 | 备份包及其 sha256 |
+| 每天首次使用或凭证过期 | `aws login --profile dev` | `aws sso login --sso-session main-sso` |
+| 正常使用 | `aws s3 ls --profile dev`（与迁移前相同） | 同左 |
+| 查看临时凭证到期时间 | `aws configure export-credentials --profile dev \| grep Expiration` | 同左 |
+| 退出 | `aws logout --profile dev`，或 `aws logout --all` | `aws sso logout`（会退出本机**所有** SSO 会话） |
 
-在笔者的实际迁移中，一台工作站涉及全球区域和中国区域共 3 个账号、7 个 profile（文中示例做了简化，为 6 个）。从备份到全部验证通过约 30 分钟，原有脚本一行未改。
+**设备丢失时**，本地退出不够，需要在服务端切断。注意：已经签发的临时凭证在到期前一直有效，只阻止重新登录是不够的。
+
+- **路径 B**：管理员在 IAM Identity Center 控制台[结束该用户的活动会话](https://docs.aws.amazon.com/singlesignon/latest/userguide/end-active-sessions.html)，阻止其再换取凭证；同时在每个目标账号对 `AWSReservedSSO_*` 角色[撤销活动会话](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html)，使已换出的角色凭证失效。
+- **路径 A 的联合角色**：在 IAM 中[撤销角色的活动会话](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html)。
+- **路径 A 的 IAM 用户**：重置控制台密码和 MFA 只能阻止重新登录。还要给该用户附加一条 Deny 策略，带 `aws:TokenIssueTime` 早于当前时间的条件，使已签发的临时凭证失效。撤销角色会话用的也是这一机制。
+
+---
+
+## 让 Kiro 替你完成迁移
+
+上面的命令也可以交给 [Kiro](https://kiro.dev/docs/cli/)（IDE 对话面板或终端里的 `kiro-cli`）代为执行，你只负责确认和登录。交给 Kiro 之前请注意：
+
+- **先自己通读一遍本文**。提示词让 Kiro 读取的是本文在亚马逊云科技中国博客上的页面，不要把它指向未经审阅的转载或副本。
+- **AI 助手与你是同一个系统用户**，技术上能读到 `~/.aws/credentials`。提示词要求它只运行文中的脚本（这些脚本不输出密钥），但这只是约定，不是隔离。
+
+把尖括号里的内容换成自己的信息、删掉不适用的路径，整段粘贴给 Kiro。
+
+> ⚠️ **注意：提示词中的区域默认写的是 `us-east-1`，请改成自己的区域；SSO Region 以门户 *Access keys* 页面显示的为准。**
+
+```text
+请阅读这篇文章：<本文网址>
+按文中步骤 1 到步骤 6，帮我把这台电脑上的 AWS CLI 从长期访问密钥迁移到临时凭证。
+
+我的信息（profile 名称 = 账号 ID / 路径）：
+- 路径 B：SSO Start URL：<https://d-xxxxxxxxxx.awsapps.com/start>，SSO Region：<us-east-1>
+  - prod = <111111111111> / 权限集 <AdministratorAccess>
+  - （如有中国区域）Start URL：<...>，Region：cn-northwest-1，china = <333333333333> / 权限集 <AdministratorAccess>
+- 路径 A：dev = <444444444444> / 区域 <us-east-1>
+
+请遵守：
+1. 每一步先说明要执行的命令，等我回复"继续"再执行；每步做完按文中检查点汇报结果。
+2. 修改 ~/.aws 下的任何文件之前，先完成步骤 1 的备份（放在家目录，不要放进云盘同步目录）；
+   改写 config 和 credentials 时，先用 --dry-run 给我看差异。
+3. 只运行文中给出的命令和脚本；不要用 cat、less 等查看 ~/.aws/credentials 或 ~/.aws 下的任何缓存目录，
+   不在输出中显示任何密钥或令牌的值，访问密钥 ID 一律打码（例如 AKIA****ABCD）；
+   不得解压、列出内容或读取 ~/aws-backup-*.zip 备份包。
+4. aws login 和 aws sso login 由我在浏览器里完成，你给出命令后等我回复"已登录"。
+5. IAM 中的停用、删除命令必须逐条列出、逐条经我确认，不得批量执行。
+6. 不要执行 aws logout 或 aws sso logout，不要删除 ~/.aws 下的缓存文件。
+```
+
+---
+
+## 原理与背景
+
+亚马逊云科技在 [IAM 安全最佳实践](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)中建议：人类用户应通过身份提供商联合访问，并使用临时凭证。[Well-Architected 安全支柱 SEC02-BP02](https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/sec_identities_unique.html) 也把“开发者使用 IAM 用户长期访问密钥”列为高风险反模式。共享凭证文件中的密钥是明文存储的，本机能读到它的程序越多，泄露的可能就越大。治本的办法不是把密钥藏得更好，而是让工作站上**根本没有长期密钥**。
+
+| 维度 | 迁移前 | 迁移后 |
+|---|---|---|
+| 本机凭证 | 长期访问密钥（`AKIA`），不过期 | 登录会话缓存；调用 API 时用临时凭证（`ASIA`） |
+| 获取方式 | 复制、粘贴密钥 | 浏览器登录，沿用 MFA |
+| 现有脚本 | — | profile 名称不变，无需修改 |
+
+![方案架构](images/architecture.svg)
+
+*图 1：路径 B 的凭证获取流程。路径 A 流程类似，令牌缓存在 `~/.aws/login/cache/`。*
+
+- **【B】**：`aws sso login` 完成 Identity Center 登录后，令牌缓存在 `~/.aws/sso/cache/`。调用 API 时，CLI 按 profile 换取目标账号中 `AWSReservedSSO_<权限集>_*` 角色的临时凭证。临时凭证有效期由**权限集会话时长**决定（1–12 小时），多久需要重新登录由 **Identity Center 用户会话时长**决定。
+- **【A】**：`aws login` 复用控制台身份，令牌缓存在 `~/.aws/login/cache/`，CLI 每 15 分钟自动刷新临时凭证，会话最长 12 小时。
+
+**残余风险**：上述缓存和 `~/.aws/cli/cache/` 仍是明文，被复制后在会话有效期内仍可使用。所以会话时长不要设得过长，并开启磁盘加密（如 macOS FileVault）。
+
+笔者的一台工作站涉及全球区域和中国区域共 3 个账号、7 个 profile。在已具备 Identity Center 访问权限的前提下，从备份到全部验证通过约 30 分钟，原有脚本一行未改。
 
 ---
 
 ## 进阶建议
 
-- **防止新增长期密钥**：在 AWS Organizations 中，可以用[服务控制策略（SCP）](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html)拒绝成员账号创建访问密钥，再通过条件为确有需要的角色设置例外。注意三点：SCP 对管理账户中的用户和角色不生效；SCP 只能阻止新建，已有的密钥仍需按步骤 6 处理；请先挂到测试 OU 验证，再逐步推广。
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "DenyCreateAccessKey",
-    "Effect": "Deny",
-    "Action": "iam:CreateAccessKey",
-    "Resource": "*",
-    "Condition": {
-      "ArnNotLike": {
-        "aws:PrincipalArn": "arn:aws:iam::*:role/AccessKeyBreakGlassRole"
-      }
-    }
-  }]
-}
-```
-
-> 示例中的 `AccessKeyBreakGlassRole` 是例外角色名，请换成你自己的。中国区域的 ARN 前缀为 `arn:aws-cn:`。
-
-- **无人值守任务使用 IAM 角色**：cron、CI/CD 等自动化任务，不适合使用需要交互登录的 SSO。
-  - 在 AWS 上运行的任务，请使用 EC2 实例角色、Lambda 执行角色等。
-  - 在 AWS 之外运行的任务，可以考虑 [IAM Roles Anywhere](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/introduction.html) 或 OIDC 联合。
-  - 更多选择参见 AWS Security Blog 文章 [Beyond IAM access keys](https://aws.amazon.com/blogs/security/beyond-iam-access-keys-modern-authentication-approaches-for-aws/)。
-- **监控与告警**：结合 AWS CloudTrail 和 Amazon EventBridge，对 `CreateAccessKey`、未使用 MFA 的控制台登录等高风险事件设置告警；启用 Amazon GuardDuty，及时发现凭证被异常使用的迹象；再配合 AWS Budgets 和 AWS Cost Anomaly Detection，兜底发现异常资源消耗。
-- **AI 编码助手的权限**：如何为 AI 编码助手和 AI 代理设计 AWS 访问权限，可延伸阅读 AWS 安全博客《[Secure AI agent access patterns to AWS resources using Model Context Protocol](https://aws.amazon.com/blogs/security/secure-ai-agent-access-patterns-to-aws-resources-using-model-context-protocol/)》。
-- **持续治理**：定期查看 IAM 凭证报告和 IAM Access Analyzer 的未使用访问结果，确保长期密钥保持"清零"。
+- **防止新增长期密钥**：在 AWS Organizations 中用[服务控制策略（SCP）](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html)拒绝 `iam:CreateAccessKey`，并用 `aws:PrincipalArn` 条件为确需例外的角色放行。SCP 对管理账户不生效，也只能阻止新建，请先在测试 OU 验证。
+- **无人值守任务使用 IAM 角色**：cron、CI/CD 不适合交互登录。在亚马逊云科技上运行的用实例角色或执行角色；在亚马逊云科技之外运行的，考虑 [IAM Roles Anywhere](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/introduction.html) 或 OIDC 联合。
+- **监控**：用 AWS CloudTrail 和 Amazon EventBridge 对 `CreateAccessKey` 等事件告警，启用 Amazon GuardDuty 发现凭证异常使用。
 
 ---
 
 ## 总结
 
-回到开头那个小实验。迁移完成后，再执行一次：
+迁移完成后，再执行一次开头那条命令：
 
-```bash
-grep -c 'AKIA' ~/.aws/credentials      # 期望结果：0
+```console
+$ grep -o 'AKIA' ~/.aws/credentials ~/.aws/config 2>/dev/null | wc -l
+0
 ```
 
-看到 0，说明这台工作站已经告别了永不过期的钥匙。回顾一下，整个迁移的关键只有三点：
+关键只有三点：
 
-1. **先备份、先预览，保留原有 profile 名称**。迁移对现有脚本完全透明。
-2. **清理 credentials 中的同名静态段**，并逐个确认每个 profile 拿到的都是临时凭证。
-3. **在 IAM 中真正停用并删除旧密钥**，而不只是删掉本地文件。
+1. **按现状选路径**：能登录 Identity Center 门户就用路径 B（`sso-session`），否则用 `aws login`。两种情况都能去掉明文凭证。
+2. **先备份、先预览，保留原有 profile 名称，删掉同名静态段**，再逐个确认拿到的都是临时凭证。
+3. **在 IAM 中真正停用并删除旧密钥**，而不只是删除本地文件。
 
-做完这三点，工程师每天在浏览器里登录一次，其余用法与迁移前完全一样。工作站上运行的工具越来越多，AI 编码助手也越来越能干，在这样的环境里，让电脑里"无钥可偷"，是投入最小、收益最直接的安全加固之一。更好的是，这件事本身也可以交给 AI 编码助手来做：给 Kiro 粘贴一段提示词，你只负责确认和登录。
-
-**不妨就从现在开始：打开终端，执行开头那条命令。如果结果不是 0，就打开 Kiro，把上文的提示词粘贴进去。**
+不妨现在就打开终端，执行开头那条命令。如果结果不是 0，就按“选择你的路径”挑一条开始。
 
 ---
 
@@ -606,26 +563,13 @@ grep -c 'AKIA' ~/.aws/credentials      # 期望结果：0
 
 1. IAM 用户指南：[Security best practices in IAM](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)
 2. AWS Well-Architected 框架：[SEC02-BP02 Use temporary credentials](https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/sec_identities_unique.html)
-3. IAM 用户指南：[Manage access keys for IAM users](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)
+3. AWS CLI 用户指南：[Login for AWS local development using console credentials](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html)（适用于全球商业区域，中国区域暂不可用）
 4. AWS CLI 用户指南：[Configuring IAM Identity Center authentication with the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html)
-5. AWS CLI 用户指南：[Login for AWS local development using console credentials](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html)
-6. AWS Security Blog：[Simplified developer access to AWS with 'aws login'](https://aws.amazon.com/blogs/security/simplified-developer-access-to-aws-with-aws-login/)
-7. AWS IAM Identity Center 用户指南：[Set session duration for AWS accounts](https://docs.aws.amazon.com/singlesignon/latest/userguide/howtosessionduration.html)
-8. AWS IAM Identity Center 用户指南：[Configure the session duration in IAM Identity Center](https://docs.aws.amazon.com/singlesignon/latest/userguide/configure-user-session.html)
-9. AWS IAM Identity Center 用户指南：[View and end active sessions for your workforce users](https://docs.aws.amazon.com/singlesignon/latest/userguide/end-active-sessions.html)
-10. [IAM Identity Center in Amazon Web Services China](https://docs.amazonaws.cn/en_us/aws/latest/userguide/iam-identity-center.html)
-11. IAM 用户指南：[Generate credential reports for your AWS account](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_getting-report.html)
-12. IAM 用户指南：[IAM Access Analyzer findings](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-analyzer-findings.html)
-13. AWS CLI 命令参考：[aws sso logout](https://docs.aws.amazon.com/cli/latest/reference/sso/logout.html)
-14. AWS Organizations 用户指南：[Service control policies (SCPs)](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html)
-15. [What is IAM Roles Anywhere?](https://docs.aws.amazon.com/rolesanywhere/latest/userguide/introduction.html)
-16. AWS Security Blog：[Beyond IAM access keys: Modern authentication approaches for AWS](https://aws.amazon.com/blogs/security/beyond-iam-access-keys-modern-authentication-approaches-for-aws/)
-17. AWS Security Blog：[Secure AI agent access patterns to AWS resources using Model Context Protocol](https://aws.amazon.com/blogs/security/secure-ai-agent-access-patterns-to-aws-resources-using-model-context-protocol/)
-18. Kiro 文档：[Kiro CLI](https://kiro.dev/docs/cli/)
+5. AWS IAM Identity Center 用户指南：[Set session duration for AWS accounts](https://docs.aws.amazon.com/singlesignon/latest/userguide/howtosessionduration.html)
+6. AWS IAM Identity Center 用户指南：[View and end active sessions for your workforce users](https://docs.aws.amazon.com/singlesignon/latest/userguide/end-active-sessions.html)
+7. [IAM Identity Center in Amazon Web Services China](https://docs.amazonaws.cn/en_us/aws/latest/userguide/iam-identity-center.html)
+8. IAM 用户指南：[Generate credential reports for your AWS account](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_getting-report.html)
+9. IAM 用户指南：[Revoking IAM role temporary security credentials](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html)
+10. AWS Security Blog：[Beyond IAM access keys: Modern authentication approaches for AWS](https://aws.amazon.com/blogs/security/beyond-iam-access-keys-modern-authentication-approaches-for-aws/)
+
 *亚马逊云科技中国区域的相关云服务由西云数据和光环新网运营，具体信息以中国区域官网为准。*
-
----
-
-## License
-
-本文内容与示例代码以 [MIT-0](LICENSE) 许可发布，可自由使用、修改和分发。
